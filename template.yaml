@@ -13,6 +13,12 @@ Globals:
         CLIENT_ID: !Ref UserPoolClient
         GOOGLE_CLIENT_ID: !Ref GoogleClientId
         GOOGLE_CLIENT_SECRET: !Ref GoogleClientSecret
+        PLAID_CLIENT_ID: !Ref PlaidClientId
+        PLAID_SECRET: !Ref PlaidSecret
+        PLAID_ENV: !Ref PlaidEnv
+        PLAID_ITEMS_TABLE: !Ref PlaidItemsTable
+        PLAID_ACCOUNTS_TABLE: !Ref PlaidAccountsTable
+        SUBSCRIPTION_REMINDERS_TABLE: !Ref SubscriptionRemindersTable
     Tags:
       Project: Bract
       Environment: Development
@@ -26,8 +32,50 @@ Parameters:
     Type: String
     Description: Google OAuth Client Secret
     NoEcho: true
+  PlaidClientId:
+    Type: String
+    Description: Plaid Client ID
+    NoEcho: true
+  PlaidSecret:
+    Type: String
+    Description: Plaid Secret
+    NoEcho: true
+  PlaidEnv:
+    Type: String
+    Description: Plaid Environment (sandbox/development/production)
+    Default: sandbox
+    AllowedValues:
+      - sandbox
+      - development
+      - production
+  FromEmail:
+    Type: String
+    Description: Email address to send notifications from (must be verified in SES)
+    Default: your-email@example.com
 
 Resources:
+  # API Gateway with Cognito Authorizer
+  ApiGatewayApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: Prod
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !GetAtt UserPool.Arn
+            AuthorizationScopes:
+              - email
+              - openid
+              - profile
+        AddDefaultAuthorizerToCorsPreflight: false
+      Cors:
+        AllowMethods: "'*'"
+        AllowHeaders: "'*'"
+        AllowOrigin: "'http://localhost:5173'"
+        AllowCredentials: "'true'"
+        MaxAge: "'600'"
+
   # Cognito User Pool
   UserPool:
     Type: AWS::Cognito::UserPool
@@ -88,44 +136,276 @@ Resources:
         - email
         - name
 
-  # API Gateway with Cognito Authorizer
-  ApiGatewayApi:
-    Type: AWS::Serverless::Api
+  # DynamoDB Tables
+  PlaidItemsTable:
+    Type: AWS::DynamoDB::Table
     Properties:
-      StageName: Prod
-      Auth:
-        DefaultAuthorizer: CognitoAuthorizer
-        Authorizers:
-          CognitoAuthorizer:
-            UserPoolArn: !GetAtt UserPool.Arn
-      Cors:
-        AllowMethods: "'GET,POST,OPTIONS'"
-        AllowHeaders: "'Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token'"
-        AllowOrigin: "'http://localhost:5173'"
-      DefinitionBody:
-        swagger: "2.0"
-        info:
-          title: Bract API
-        paths:
-          /health:
-            get:
-              responses:
-                '200':
-                  description: Health check response
-                  schema:
-                    type: object
-                    properties:
-                      status:
-                        type: string
-              x-amazon-apigateway-integration:
-                type: mock
-                requestTemplates:
-                  application/json: '{"statusCode": 200}'
-                responses:
-                  default:
-                    statusCode: 200
-                    responseTemplates:
-                      application/json: '{"status": "ok"}'
+      TableName: plaid-items
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: item_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: user_id
+          KeyType: HASH
+        - AttributeName: item_id
+          KeyType: RANGE
+
+  PlaidAccountsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: plaid-accounts
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: account_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: user_id
+          KeyType: HASH
+        - AttributeName: account_id
+          KeyType: RANGE
+
+  SubscriptionRemindersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: subscription-reminders
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: stream_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: user_id
+          KeyType: HASH
+        - AttributeName: stream_id
+          KeyType: RANGE
+
+  # Plaid Lambda Functions
+  CreateLinkTokenFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/src/
+      Handler: handlers.plaid_handler.create_link_token
+      Runtime: python3.9
+      Events:
+        CreateLinkToken:
+          Type: Api
+          Properties:
+            Path: /plaid/link-token
+            Method: post
+            RestApiId: !Ref ApiGatewayApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+        CreateLinkTokenOptions:
+          Type: Api
+          Properties:
+            Path: /plaid/link-token
+            Method: options
+            RestApiId: !Ref ApiGatewayApi
+            Auth:
+              Authorizer: NONE
+
+  ExchangeTokenFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/src/
+      Handler: handlers.plaid_handler.exchange_token
+      Runtime: python3.9
+      Events:
+        ExchangeToken:
+          Type: Api
+          Properties:
+            Path: /plaid/exchange-token
+            Method: post
+            RestApiId: !Ref ApiGatewayApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+        ExchangeTokenOptions:
+          Type: Api
+          Properties:
+            Path: /plaid/exchange-token
+            Method: options
+            RestApiId: !Ref ApiGatewayApi
+            Auth:
+              Authorizer: NONE
+      Policies:
+      - DynamoDBCrudPolicy:
+          TableName: !Ref PlaidItemsTable
+      - DynamoDBCrudPolicy:
+          TableName: !Ref PlaidAccountsTable
+
+  GetAccountsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/src/
+      Handler: handlers.plaid_handler.get_accounts
+      Runtime: python3.9
+      Events:
+        GetAccounts:
+          Type: Api
+          Properties:
+            Path: /plaid/accounts
+            Method: get
+            RestApiId: !Ref ApiGatewayApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+        GetAccountsOptions:
+          Type: Api
+          Properties:
+            Path: /plaid/accounts
+            Method: options
+            RestApiId: !Ref ApiGatewayApi
+            Auth:
+              Authorizer: NONE
+      Policies:
+      - DynamoDBReadPolicy:
+          TableName: !Ref PlaidAccountsTable
+
+  SubscriptionsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/src/
+      Handler: handlers.plaid_handler.get_subscriptions
+      Runtime: python3.9
+      Events:
+        GetSubscriptions:
+          Type: Api
+          Properties:
+            Path: /subscriptions
+            Method: get
+            RestApiId: !Ref ApiGatewayApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+        GetSubscriptionsOptions:
+          Type: Api
+          Properties:
+            Path: /subscriptions
+            Method: options
+            RestApiId: !Ref ApiGatewayApi
+            Auth:
+              Authorizer: NONE
+      Policies:
+      - DynamoDBReadPolicy:
+          TableName: !Ref PlaidItemsTable
+
+  GetRemindersFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/src/
+      Handler: handlers.reminders_handler.get_reminders
+      Runtime: python3.9
+      Environment:
+        Variables:
+          SUBSCRIPTION_REMINDERS_TABLE: !Ref SubscriptionRemindersTable
+      Events:
+        GetReminders:
+          Type: Api
+          Properties:
+            Path: /reminders
+            Method: get
+            RestApiId: !Ref ApiGatewayApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SubscriptionRemindersTable
+
+  SetReminderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/src/
+      Handler: handlers.reminders_handler.set_reminder
+      Runtime: python3.9
+      Environment:
+        Variables:
+          SUBSCRIPTION_REMINDERS_TABLE: !Ref SubscriptionRemindersTable
+      Events:
+        SetReminder:
+          Type: Api
+          Properties:
+            Path: /reminders
+            Method: post
+            RestApiId: !Ref ApiGatewayApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SubscriptionRemindersTable
+
+  # Scheduled Lambda Function for Subscription Sync
+  ScheduledSubscriptionSyncFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/src/
+      Handler: handlers.scheduled_handler.sync_subscriptions
+      Runtime: python3.9
+      Timeout: 300  # 5 minutes for processing all users
+      MemorySize: 256  # More memory for processing
+      Environment:
+        Variables:
+          PLAID_ITEMS_TABLE: !Ref PlaidItemsTable
+          PLAID_ACCOUNTS_TABLE: !Ref PlaidAccountsTable
+          SUBSCRIPTION_REMINDERS_TABLE: !Ref SubscriptionRemindersTable
+          PLAID_CLIENT_ID: !Ref PlaidClientId
+          PLAID_SECRET: !Ref PlaidSecret
+          PLAID_ENV: !Ref PlaidEnv
+      Events:
+        DailySubscriptionSync:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 day)  # Run daily at midnight UTC
+            Name: DailySubscriptionSync
+            Description: Daily sync of subscriptions for all users
+            Enabled: true
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref PlaidItemsTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref PlaidAccountsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SubscriptionRemindersTable
+
+  # Email Notification Lambda Function
+  EmailNotificationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/src/
+      Handler: handlers.notification_handler.send_reminders
+      Runtime: python3.9
+      Timeout: 300  # 5 minutes for processing all users
+      MemorySize: 256
+      Environment:
+        Variables:
+          SUBSCRIPTION_REMINDERS_TABLE: !Ref SubscriptionRemindersTable
+          FROM_EMAIL: !Ref FromEmail
+      Events:
+        DailyReminderCheck:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 day)  # Run daily at 9 AM UTC
+            Name: DailyReminderCheck
+            Description: Daily check for subscription reminders
+            Enabled: true
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref SubscriptionRemindersTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - ses:SendEmail
+                - ses:SendRawEmail
+              Resource: '*'
+
+  # SES Configuration
+  EmailIdentity:
+    Type: AWS::SES::EmailIdentity
+    Properties:
+      EmailIdentity: !Ref FromEmail
 
 Outputs:
   UserPoolId:

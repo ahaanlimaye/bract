@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Amplify } from 'aws-amplify';
 import { signInWithRedirect, signOut, getCurrentUser } from 'aws-amplify/auth';
 import awsConfig from './aws-exports';
+import DashboardContent from './components/DashboardContent';
 
 Amplify.configure(awsConfig);
 
@@ -16,28 +17,35 @@ interface User {
 const App: React.FC = () => {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    checkUser();
-  }, []);
+    const checkAuth = async () => {
+      try {
+        const currentUser = await getCurrentUser();
+        setUser(currentUser);
+      } catch (error) {
+        console.error('Error getting current user:', error);
+        setUser(null);
+      } finally {
+        setLoading(false);
+      }
+    };
 
-  const checkUser = async () => {
-    try {
-      const currentUser = await getCurrentUser();
-      setUser(currentUser);
-    } catch (error) {
-      console.error('Error checking user:', error);
-      setUser(null);
-    } finally {
-      setLoading(false);
-    }
-  };
+    // Check auth state on mount and after a short delay to handle redirect
+    checkAuth();
+    const timer = setTimeout(checkAuth, 1000);
+    return () => clearTimeout(timer);
+  }, []);
 
   const handleGoogleSignIn = async () => {
     try {
+      setLoading(true);
       await signInWithRedirect({ provider: 'Google' });
     } catch (error) {
       console.error('Error signing in with Google:', error);
+      setError('Failed to sign in with Google');
+      setLoading(false);
     }
   };
 
@@ -47,6 +55,7 @@ const App: React.FC = () => {
       setUser(null);
     } catch (error) {
       console.error('Error signing out:', error);
+      setError('Failed to sign out');
     }
   };
 
@@ -54,6 +63,23 @@ const App: React.FC = () => {
     return (
       <div style={styles.container}>
         <div style={styles.loading}>Loading...</div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div style={styles.container}>
+        <div style={styles.errorContainer}>
+          <h2 style={styles.errorTitle}>Error</h2>
+          <p style={styles.errorMessage}>{error}</p>
+          <button 
+            onClick={() => setError(null)} 
+            style={styles.errorButton}
+          >
+            Try Again
+          </button>
+        </div>
       </div>
     );
   }
@@ -75,9 +101,7 @@ const App: React.FC = () => {
               Sign Out
             </button>
           </div>
-          <div style={styles.content}>
-            <p style={styles.welcomeText}>Welcome, {user.username}</p>
-          </div>
+          <DashboardContent username={user.username} />
         </div>
       )}
     </div>
@@ -101,6 +125,37 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: 'center',
     fontSize: '1.2rem',
     color: '#a0a0a0',
+  },
+  errorContainer: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: '1rem',
+    padding: '2rem',
+    backgroundColor: '#242424',
+    borderRadius: '12px',
+    boxShadow: '0 4px 6px rgba(0, 0, 0, 0.1)',
+  },
+  errorTitle: {
+    fontSize: '1.5rem',
+    color: '#ff4444',
+    margin: 0,
+  },
+  errorMessage: {
+    fontSize: '1rem',
+    color: '#a0a0a0',
+    textAlign: 'center',
+  },
+  errorButton: {
+    backgroundColor: '#333333',
+    color: '#ffffff',
+    border: '1px solid #404040',
+    padding: '8px 16px',
+    borderRadius: '6px',
+    fontSize: '0.9rem',
+    cursor: 'pointer',
+    transition: 'all 0.2s ease',
+    fontWeight: '500',
   },
   authContainer: {
     display: 'flex',
@@ -163,17 +218,6 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: 'pointer',
     transition: 'all 0.2s ease',
     fontWeight: '500',
-  },
-  content: {
-    backgroundColor: '#242424',
-    borderRadius: '8px',
-    padding: '2rem',
-    minHeight: '400px',
-    width: '100%',
-  },
-  welcomeText: {
-    fontSize: '1.2rem',
-    color: '#a0a0a0',
   },
 };
 
